@@ -1,0 +1,15 @@
+{
+  "name": "hdfilmcehennemi",
+  "version": "1.0.0",
+  "scrapers": [
+    {
+      "id": "hdfilmcehennemi",
+      "name": "HDFilmCehennemi",
+      "description": "hdfilmcehennemi.nl film ve dizi, Türkçe dublaj (Dual)",
+      "version": "1.0.0",
+      "filename": "providers/hdfilmcehennemi.js",
+      "supportedTypes": ["movie", "tv"],
+      "enabled": true
+    }
+  ]
+}
