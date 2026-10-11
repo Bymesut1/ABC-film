@@ -499,14 +499,62 @@ function scriptsOf(html) {
   return out;
 }
 
+var SUB_LANGS = [
+  [/t[uü]rk|turkish|\btr\b|\btur\b/i, 'tr', 'Türkçe'], [/ingiliz|english|\ben\b|\beng\b/i, 'en', 'English'],
+  [/fransız|fransiz|french|\bfr\b|\bfre\b|\bfra\b/i, 'fr', 'Français'], [/portekiz|portug|\bpt\b|\bpor\b/i, 'pt', 'Português'],
+  [/ispanyol|spanish|espa|\bes\b|\bspa\b/i, 'es', 'Español'], [/almanca|german|deutsch|\bde\b|\bger\b/i, 'de', 'Deutsch'],
+  [/italyan|italian|\bit\b|\bita\b/i, 'it', 'Italiano'], [/arap|arabic|\bar\b|\bara\b/i, 'ar', 'العربية'],
+  [/rus|russian|\bru\b/i, 'ru', 'Русский'], [/hollanda|dutch|\bnl\b|\bdut\b/i, 'nl', 'Nederlands'], [/yunan|greek|\bel\b|\bgre\b/i, 'el', 'Ελληνικά'],
+  [/arnavut|albanian|\bsq\b|\balb\b/i, 'sq', 'Shqip'], [/sırp|sirp|serbian|\bsr\b|\bsrp\b/i, 'sr', 'Srpski'], [/isveç|isvec|swedish|\bsv\b|\bswe\b/i, 'sv', 'Svenska'],
+  [/tay|thai|\bth\b/i, 'th', 'ไทย'], [/japon|japanese|\bja\b|\bjpn\b/i, 'ja', '日本語'], [/korece|korean|\bko\b|\bkor\b/i, 'ko', '한국어'],
+  [/çince|cince|chinese|\bzh\b|\bchi\b/i, 'zh', '中文'], [/bulgar|\bbg\b|\bbul\b/i, 'bg', 'Български'], [/rumen|romanian|\bro\b|\brum\b/i, 'ro', 'Română'],
+  [/macar|hungar|\bhu\b|\bhun\b/i, 'hu', 'Magyar'], [/leh|polish|\bpl\b|\bpol\b/i, 'pl', 'Polski'], [/cek|çek|czech|\bcs\b|\bcze\b/i, 'cs', 'Čeština'],
+  [/ibran|hebrew|\bhe\b|\bheb\b/i, 'he', 'עברית'], [/fars|persian|\bfa\b|\bper\b/i, 'fa', 'فارسی'], [/hint|hindi|\bhi\b/i, 'hi', 'हिन्दी']
+];
+function subLang(label, url) {
+  var i, txt = asciiLower(label || '');
+  for (i = 0; i < SUB_LANGS.length; i++) if (SUB_LANGS[i][0].test(txt)) return { lang: SUB_LANGS[i][1], name: SUB_LANGS[i][2] };
+  var fn = asciiLower(String(url || '').split('?')[0].split('/').slice(-2).join(' '));
+  for (i = 0; i < SUB_LANGS.length; i++) if (SUB_LANGS[i][0].test(fn)) return { lang: SUB_LANGS[i][1], name: SUB_LANGS[i][2] };
+  return null;
+}
+function attrOf(tag, name) {
+  var m = tag.match(new RegExp('[\\s{,"\']' + name + '["\']?\\s*[=:]\\s*(?:"((?:[^"\\\\]|\\\\.)*)"|\'((?:[^\'\\\\]|\\\\.)*)\')', 'i'));
+  return m ? (m[1] !== undefined ? m[1] : m[2]) : '';
+}
+
+// Oynatıcının yerleşik altyazıları: <track src label srclang>, jwplayer tracks:[{file,label,kind}], .vtt/.srt bağlantıları
 function extractSubs(blob, base) {
-  var t = String(blob || '').replace(/\\\//g, '/').replace(/&amp;/g, '&');
-  var out = [], m, re = /["'(]((?:https?:\/\/|\/)[^"'\s\\)]*?(?:\.vtt|\/srt\/)[^"'\s\\)]*)["')]/g;
-  while ((m = re.exec(t)) !== null) {
-    var u = /^https?:/.test(m[1]) ? m[1] : (base + m[1]), low = u.toLowerCase();
-    var lang = /tur|turk/.test(low) ? 'tr' : (/eng|english/.test(low) ? 'en' : '');
-    if (lang) out.push({ url: u, lang: lang, label: lang === 'tr' ? 'Türkçe' : 'English' });
+  var t = String(blob || '').replace(/\\\//g, '/').replace(/\\u0026/g, '&').replace(/&amp;/g, '&').replace(/&quot;/g, '"');
+  var out = [], seen = {};
+  function push(url, label, kind, srclang) {
+    url = String(url || '').replace(/\\/g, '');
+    if (!url || /thumb|sprite|storyboard/i.test(url) || /thumbnails/i.test(kind || '')) return;
+    if (/\.(jpe?g|png|webp|gif|css|js|m3u8|mp4)(\?|$)/i.test(url)) return;
+    url = /^https?:/i.test(url) ? url : (url.indexOf('//') === 0 ? 'https:' + url : base + (url.charAt(0) === '/' ? '' : '/') + url);
+    if (junkUrl(url) || seen[url]) return;
+    seen[url] = 1;
+    var info = subLang(srclang, '') || subLang(label, url), lab = String(label || '').trim();
+    var forced = /forced|zorunlu/i.test(lab + ' ' + url);
+    var lang = info ? info.lang : 'und';
+    out.push({ url: url, lang: lang, label: lab || (info ? info.name : 'Altyazı') + (forced ? ' (Forced)' : '') });
   }
+  var m, re;
+  re = /<track\b[^>]*>/gi;                                    // <track kind="subtitles" src=".." srclang="tr" label="Türkçe">
+  while ((m = re.exec(t)) !== null) {
+    var kd = attrOf(' ' + m[0], 'kind');
+    if (/metadata|chapters|descriptions/i.test(kd)) continue;
+    push(attrOf(' ' + m[0], 'src') || attrOf(' ' + m[0], 'file'), attrOf(' ' + m[0], 'label'), kd, attrOf(' ' + m[0], 'srclang'));
+  }
+  re = /\{[^{}]{0,600}\}/g;                                   // {file:"..", label:"Türkçe", kind:"captions"}  /  {"src":"..","srclang":"tr"}
+  while ((m = re.exec(t)) !== null) {
+    var o = m[0], kind = attrOf(o, 'kind'), f = attrOf(o, 'file') || attrOf(o, 'src') || attrOf(o, 'url');
+    if (!f) continue;
+    var isSub = /\.(vtt|srt|ass|ssa|sub)(\?|$)|\/(srt|sub|subs|subtitle|subtitles|vtt)\//i.test(f) || /captions|subtitles/i.test(kind);
+    if (isSub) push(f, attrOf(o, 'label') || attrOf(o, 'name') || attrOf(o, 'title'), kind, attrOf(o, 'srclang') || attrOf(o, 'lang') || attrOf(o, 'language'));
+  }
+  re = /["'(]((?:https?:\/\/|\/)[^"'\s\\)]*?(?:\.vtt|\.srt|\/srt\/)[^"'\s\\)]*)["')]/g;   // yalın bağlantılar
+  while ((m = re.exec(t)) !== null) push(m[1], '', '', '');
   return out;
 }
 
@@ -592,6 +640,7 @@ function resolveEmbed(embedUrl, pageUrl, depth) {
       }
       blobs.forEach(function (b) { extractSubs(b, originOf(j.v)).forEach(function (s) { if (!seenS[s.url]) { seenS[s.url] = 1; subs.push(s); } }); });
       note('blob url ' + c.urls.length + ' sub ' + subs.length);
+      subs.slice(0, 8).forEach(function (sb) { note('sub ' + sb.lang + ' ' + sb.label.slice(0, 18) + ' ' + sb.url.split('?')[0].slice(-34)); });
       if (c.urls.length) return { urls: c.urls, subs: subs, strict: c.strict, base: j.v };
       var inner = html.match(/<iframe[^>]*?\s(?:data-src|src)="((?:https?:)?\/\/[^"]+)"/i);
       if (inner && depth < 1) {
@@ -727,7 +776,7 @@ function findPage(imdb, titles, year, isTv, season, episode) {
 
 function getStreamsInner(tmdbId, mediaType, season, episode, holder) {
   var isTv = (mediaType === 'tv' || mediaType === 'series');
-  dbg = ['v1.3.0'];
+  dbg = ['v1.4.0'];
   var base = 'https://api.themoviedb.org/3/' + (isTv ? 'tv' : 'movie') + '/' + tmdbId + '?api_key=' + TMDB_KEY;
   return Promise.all([
     getJson(base + '&language=tr-TR' + (isTv ? '&append_to_response=external_ids' : '')),
@@ -814,7 +863,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { getStreams: getStreams, _t: { sandboxRun: sandboxRun, unpackDeep: unpackDeep, extractKeyed: extractKeyed, embedVariants: embedVariants, unpack: unpack, dcDecode: dcDecode, b64: b64, deepB64: deepB64, parseAlts: parseAlts, pageIframe: pageIframe, findEpisode: findEpisode, pickBest: pickBest, extractMedia: extractMedia, parseResults: parseResults, iframeFromAjax: iframeFromAjax, denied: denied } };
+  module.exports = { getStreams: getStreams, _t: { extractSubs: extractSubs, sandboxRun: sandboxRun, unpackDeep: unpackDeep, extractKeyed: extractKeyed, embedVariants: embedVariants, unpack: unpack, dcDecode: dcDecode, b64: b64, deepB64: deepB64, parseAlts: parseAlts, pageIframe: pageIframe, findEpisode: findEpisode, pickBest: pickBest, extractMedia: extractMedia, parseResults: parseResults, iframeFromAjax: iframeFromAjax, denied: denied } };
 } else {
   global.getStreams = getStreams;
 }
