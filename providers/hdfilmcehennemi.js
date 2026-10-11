@@ -1,5 +1,5 @@
 // ============================================================
-//  hdfilmcehennemi — Nuvio scraper (hdfilmcehennemi.nl)            v1.2.0
+//  hdfilmcehennemi — Nuvio scraper (hdfilmcehennemi.nl)            v1.3.0
 //  Akış: TMDB -> site araması (IMDb no ile; /search/?q=) -> film/bölüm sayfası
 //        -> oynatıcı iframe (Close / Rapid ...) -> m3u8 (+ altyazı)
 //  Film ve dizi. Varsayılan: sadece DUAL (Türkçe Dublaj) sekmesi.
@@ -397,12 +397,16 @@ function b64Strings(html) {
   return out;
 }
 
+function junkUrl(u) {
+  return /cloudflareinsights|cloudflare\.com|googletagmanager|google-analytics|googlesyndication|gstatic|googleapis|doubleclick|facebook\.|twitter\.|jquery|cdnjs|jsdelivr|unpkg|bootstrapcdn|histats|yandex|adsterra|popads|beacon\.min\.js|\/cdn-cgi\//i.test(String(u));
+}
+
 function extractMedia(blob) {
   var t = String(blob || '').replace(/\\\//g, '/').replace(/\\u0026/g, '&').replace(/\\x2F/gi, '/').replace(/&amp;/g, '&');
   var urls = [], m, re = /https?:\/\/[^"'\s<>\\)]+/g;
   while ((m = re.exec(t)) !== null) {
     var u = m[0];
-    if (/\.(vtt|srt|jpe?g|png|webp|gif|css|js|ico|svg|woff2?)(\?|\/?$)/i.test(u)) continue;
+    if (/\.(vtt|srt|jpe?g|png|webp|gif|css|js|ico|svg|woff2?)(\?|\/?$)/i.test(u) || junkUrl(u)) continue;
     if (/\.m3u8|\.mp4|sublist|\/hls\d?\/|\/(?:master|playlist|index)[^\/"']*\.txt/i.test(u)) urls.push(u);
   }
   var re2 = /["'](\/\/[^"'\s\\]+\.(?:m3u8|mp4)[^"'\s\\]*)["']/g;
@@ -417,7 +421,7 @@ function extractKeyed(blob) {
   var out = [], m, re = /["']?(?:file|file_link|contentUrl|source|src|hls|stream|stream_url|video_url|url|m3u8|playlist)["']?\s*[:=]\s*["'](https?:\/\/[^"'\s\\]+)["']/gi;
   while ((m = re.exec(t)) !== null) {
     var u = m[1];
-    if (/\.(vtt|srt|jpe?g|png|webp|gif|css|js|ico|svg|woff2?|html?)(\?|$)/i.test(u)) continue;
+    if (/\.(vtt|srt|jpe?g|png|webp|gif|css|js|ico|svg|woff2?|html?)(\?|$)/i.test(u) || junkUrl(u) || /\.js\//i.test(u)) continue;
     if (/\/(srt|sub|subtitle|vtt)\//i.test(u)) continue;
     out.push(u);
   }
@@ -522,7 +526,7 @@ function embedHeaders(embedUrl, ref) {
 function embedVariants(u) {
   var out = [u], id = (String(u).match(/[?&]rapidrame_id=([^&#"']+)/) || [])[1];
   if (id) {
-    out.unshift(AYAR.SITE + '/playerr/' + id);
+    out.push(AYAR.SITE + '/playerr/' + id);
     out.push(AYAR.SITE + '/rplayer/' + id);
   }
   // 404 / engel: öteki site adresini de dene
@@ -569,16 +573,20 @@ function resolveEmbed(embedUrl, pageUrl, depth) {
       if (r.status !== 200 || !html) return tryJob(i + 1);
       var blobs = collectBlobs(html), subs = [], seenS = {};
       var c = candFrom(blobs);
-      if (!c.urls.length) {
+      if (!Object.keys(c.strict).length) {
         // statik çözüm bulamadı: şifre çözücü betikleri sahte tarayıcıda çalıştır
         diagPage(html);
+        scriptsOf(html).slice(0, 8).forEach(function (sc, si) { note('scr' + si + ' len' + sc.length + ' ' + sc.slice(0, 40).replace(/\s+/g, ' ')); });
         var codes = unpackDeep(html).concat(scriptsOf(html).filter(function (x) { return /dc_|atob|jwplayer|sources|fromCharCode|Playerjs/.test(x) && !/while\s*\(\s*(true|1)\s*\)|for\s*\(\s*;\s*;\s*\)/.test(x); })).slice(0, 5);
         var caps = [];
         codes.forEach(function (code, ci) { var rs = sandboxRun(code, caps); if (ci < 3) note('kum ' + ci + ' ' + rs + ' len' + code.length + ' yakalanan ' + caps.length); });
+        if (caps.length) note('cap ' + String(caps[0]).slice(0, 90));
         if (caps.length) {
           var blobs2 = caps.slice();
           caps.forEach(function (cp) { if (/^https?:\/\/\S+$/.test(cp)) blobs2.push('file:"' + cp + '"'); });
-          c = candFrom(blobs2);
+          var c2 = candFrom(blobs2);
+          c2.urls.forEach(function (u) { if (c.urls.indexOf(u) === -1) c.urls.push(u); });
+          Object.keys(c2.strict).forEach(function (k) { c.strict[k] = 1; });
           blobs = blobs.concat(blobs2);
         }
       }
@@ -613,7 +621,8 @@ function streamHeaderSets(embedUrl) {
 
 function isPlaylist(r) { return (r.status === 200 || r.status === 206) && /^\s*#EXTM3U/.test(r.text || ''); }
 
-function verifyUrl(u, sets) {
+function verifyUrl(u, sets0) {
+  var own = originOf(u), sets = [{ 'User-Agent': UA, 'Referer': own + '/', 'Origin': own }].concat(sets0);
   if (!AYAR.DOGRULA || /\.mp4(\?|$)/i.test(u)) return Promise.resolve({ ok: true, headers: sets[0], kind: 'mp4' });
   function next(i) {
     if (i >= sets.length) return Promise.resolve({ ok: false, headers: sets[0], kind: 'x' });
@@ -718,7 +727,7 @@ function findPage(imdb, titles, year, isTv, season, episode) {
 
 function getStreamsInner(tmdbId, mediaType, season, episode, holder) {
   var isTv = (mediaType === 'tv' || mediaType === 'series');
-  dbg = ['v1.2.0'];
+  dbg = ['v1.3.0'];
   var base = 'https://api.themoviedb.org/3/' + (isTv ? 'tv' : 'movie') + '/' + tmdbId + '?api_key=' + TMDB_KEY;
   return Promise.all([
     getJson(base + '&language=tr-TR' + (isTv ? '&append_to_response=external_ids' : '')),
