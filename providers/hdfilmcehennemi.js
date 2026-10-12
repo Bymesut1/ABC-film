@@ -20,7 +20,7 @@ var AYAR = {
   SITE: 'https://hdfilmcehennemi.nl',
   EKLENTI_ADI: 'hdfilmcehennemi',
   // true iken akış çıkmazsa (ve akışların altında) neden çıkmadığını yazan "DEBUG" satırları görünür. Çalışınca false yap.
-  DEBUG_MODU: false,
+  DEBUG_MODU: true,
   ALTYAZILI_GOSTER: false,  // true: "Altyazılı" sekmesindeki oynatıcılar da eklenir
   MAX_ALTERNATIF: 4,        // en fazla kaç oynatıcı (Rapid, Close ...) denensin
   ALTYAZI_TANI: true,       // deneme: her altyazı 2-3 biçimde (düz / gömülü vtt / gömülü srt) listelenir; hangisi çalışırsa onu söyle, gerisini kapatırız
