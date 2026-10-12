@@ -23,6 +23,7 @@ var AYAR = {
   DEBUG_MODU: false,
   ALTYAZILI_GOSTER: false,  // true: "Altyazılı" sekmesindeki oynatıcılar da eklenir
   MAX_ALTERNATIF: 4,        // en fazla kaç oynatıcı (Rapid, Close ...) denensin
+  ALTYAZI_TANI: true,       // deneme: her altyazı 2-3 biçimde (düz / gömülü vtt / gömülü srt) listelenir; hangisi çalışırsa onu söyle, gerisini kapatırız
   ALTYAZI_VERI_URI: true,   // oynatıcı altyazıyı kendi çekemiyorsa (Referer isteyen sunucu) altyazıyı eklentide indirip data: adresi olarak ver
   DOGRULA: true,            // m3u8 bağlantılarını oynatmadan önce kontrol et (Source error'u önler)
   ISTEK_SURESI: 7000,       // ms: tek istek üst sınırı
@@ -740,6 +741,18 @@ function toVtt(t) {
   if (/^\s*WEBVTT/.test(t)) return t;
   return 'WEBVTT\n\n' + t.replace(/\r/g, '').replace(/(\d\d:\d\d:\d\d),(\d{3})/g, '$1.$2');
 }
+function vttToSrt(t) {
+  var blocks = String(t || '').replace(/^\uFEFF/, '').replace(/\r/g, '').split(/\n\n+/), out = [], n = 1;
+  blocks.forEach(function (b) {
+    if (/^\s*(WEBVTT|NOTE|STYLE)/.test(b)) return;
+    var lines = b.split('\n').filter(function (l) { return l !== ''; }), ti = -1, i;
+    for (i = 0; i < lines.length; i++) if (/-->/.test(lines[i])) { ti = i; break; }
+    if (ti < 0) return;
+    var time = lines[ti].replace(/(\d+:\d\d:\d\d)\.(\d{3})/g, '$1,$2').replace(/(^|\D)(\d\d:\d\d)\.(\d{3})/g, '$100:$2,$3').replace(/\s+(align|position|line|size|vertical):.*$/, '');
+    out.push((n++) + '\n' + time + '\n' + lines.slice(ti + 1).join('\n').replace(/<[^>]+>/g, ''));
+  });
+  return out.join('\n\n') + '\n';
+}
 function isSubText(r) { return r.status === 200 && /^\s*(?:\uFEFF)?\s*(WEBVTT|\d+\s*\r?\n\s*\d\d:\d\d)/.test(r.text || ''); }
 
 // Altyazıyı indirip dene: başlıksız açılıyorsa düz adres; Referer isteyen sunucuysa eklentide indirilip data: adresine gömülür
@@ -755,13 +768,22 @@ function prepSub(sb, embedUrl) {
     });
   }
   var p = next(0).then(function (g) {
-    var lang3 = LANG3[sb.lang] || sb.lang || 'und';
-    var out = { id: 'hdfc-' + lang3 + '-' + (sb.url.split('/').pop() || '').slice(0, 24), url: sb.url, lang: lang3, language: lang3, label: sb.label, name: sb.label, title: sb.label };
-    if (!g) { note('sub ' + lang3 + ' acilmadi'); return out; }              // indirilemedi: yine de düz adresi ver
-    if (g.i === 0) { note('sub ' + lang3 + ' acik ' + g.text.length); return out; }
-    note('sub ' + lang3 + ' basliklı h' + g.i + ' ' + g.text.length);
-    out.headers = g.h;
-    if (AYAR.ALTYAZI_VERI_URI && g.text.length < 600000) out.url = 'data:text/vtt;charset=utf-8;base64,' + b64enc(toVtt(g.text));
+    var lang3 = LANG3[sb.lang] || sb.lang || 'und', base = (sb.url.split('/').pop() || '').slice(0, 24);
+    function mk(tag, suffix, url, hdr) {
+      var lab = sb.label + (AYAR.ALTYAZI_TANI ? ' (' + suffix + ')' : '');
+      var o = { id: 'hdfc-' + lang3 + '-' + base + '-' + tag, url: url, lang: lang3, language: lang3, label: lab, name: lab, title: lab };
+      if (hdr) o.headers = hdr;
+      return o;
+    }
+    if (!g) { note('sub ' + lang3 + ' acilmadi'); return [mk('d', 'düz', sb.url, null)]; }   // indirilemedi: yine de düz adresi ver
+    note('sub ' + lang3 + (g.i === 0 ? ' acik ' : ' basliklı h' + g.i + ' ') + g.text.length);
+    var out = [mk('d', 'düz', sb.url, g.i === 0 ? null : g.h)];
+    if (g.i !== 0 || AYAR.ALTYAZI_TANI) {                                  // başlık isteyen sunucu (ya da deneme modu): eklentide indirilmiş kopyalar
+      if (AYAR.ALTYAZI_VERI_URI && g.text.length < 600000) {
+        out.push(mk('v', 'gömülü vtt', 'data:text/vtt;charset=utf-8;base64,' + b64enc(toVtt(g.text)), null));
+        if (AYAR.ALTYAZI_TANI) out.push(mk('s', 'gömülü srt', 'data:application/x-subrip;charset=utf-8;base64,' + b64enc(vttToSrt(g.text)), null));
+      }
+    }
     return out;
   });
   SUBCACHE[sb.url] = p;
@@ -769,7 +791,11 @@ function prepSub(sb, embedUrl) {
 }
 function prepSubs(subs, embedUrl) {
   var list = (subs || []).slice().sort(function (a, b) { return (a.lang === 'tr' ? 0 : a.lang === 'en' ? 1 : 2) - (b.lang === 'tr' ? 0 : b.lang === 'en' ? 1 : 2); }).slice(0, 8);
-  return Promise.all(list.map(function (sb) { return prepSub(sb, embedUrl).catch(function () { return null; }); })).then(function (r) { return r.filter(Boolean); });
+  return Promise.all(list.map(function (sb) { return prepSub(sb, embedUrl).catch(function () { return null; }); })).then(function (r) {
+    var flat = [];
+    r.forEach(function (x) { (x || []).forEach(function (y) { flat.push(y); }); });
+    return flat;
+  });
 }
 
 function debugStream(msg) {
@@ -841,7 +867,7 @@ function findPage(imdb, titles, year, isTv, season, episode) {
 
 function getStreamsInner(tmdbId, mediaType, season, episode, holder) {
   var isTv = (mediaType === 'tv' || mediaType === 'series');
-  dbg = ['v1.5.0'];
+  dbg = ['v1.5.1'];
   var base = 'https://api.themoviedb.org/3/' + (isTv ? 'tv' : 'movie') + '/' + tmdbId + '?api_key=' + TMDB_KEY;
   return Promise.all([
     getJson(base + '&language=tr-TR' + (isTv ? '&append_to_response=external_ids' : '')),
@@ -930,7 +956,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { getStreams: getStreams, _t: { extractSubs: extractSubs, sandboxRun: sandboxRun, unpackDeep: unpackDeep, extractKeyed: extractKeyed, embedVariants: embedVariants, unpack: unpack, dcDecode: dcDecode, b64: b64, deepB64: deepB64, parseAlts: parseAlts, pageIframe: pageIframe, findEpisode: findEpisode, pickBest: pickBest, extractMedia: extractMedia, parseResults: parseResults, iframeFromAjax: iframeFromAjax, denied: denied } };
+  module.exports = { getStreams: getStreams, _t: { vttToSrt: vttToSrt, extractSubs: extractSubs, sandboxRun: sandboxRun, unpackDeep: unpackDeep, extractKeyed: extractKeyed, embedVariants: embedVariants, unpack: unpack, dcDecode: dcDecode, b64: b64, deepB64: deepB64, parseAlts: parseAlts, pageIframe: pageIframe, findEpisode: findEpisode, pickBest: pickBest, extractMedia: extractMedia, parseResults: parseResults, iframeFromAjax: iframeFromAjax, denied: denied } };
 } else {
   global.getStreams = getStreams;
 }
