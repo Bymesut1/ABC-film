@@ -23,6 +23,7 @@ var AYAR = {
   DEBUG_MODU: false,
   ALTYAZILI_GOSTER: false,  // true: "Altyazılı" sekmesindeki oynatıcılar da eklenir
   MAX_ALTERNATIF: 4,        // en fazla kaç oynatıcı (Rapid, Close ...) denensin
+  ALTYAZI_VERI_URI: true,   // oynatıcı altyazıyı kendi çekemiyorsa (Referer isteyen sunucu) altyazıyı eklentide indirip data: adresi olarak ver
   DOGRULA: true,            // m3u8 bağlantılarını oynatmadan önce kontrol et (Source error'u önler)
   ISTEK_SURESI: 7000,       // ms: tek istek üst sınırı
   GENEL_SURE: 25000         // ms: toplam üst sınır; dolunca o ana kadar bulunan akışlar VERİLİR
@@ -708,6 +709,69 @@ function makeStream(job, embedUrl, u, v, subs, idx) {
   return s;
 }
 
+
+// ---------------- Altyazı hazırlama ----------------
+// Nuvio dili 3 harfli kodla (tur, eng...) tanıyor; 2 harfli kod "Bilinmiyor"a düşüyordu.
+var LANG3 = { tr: 'tur', en: 'eng', fr: 'fre', pt: 'por', es: 'spa', de: 'ger', it: 'ita', ar: 'ara', ru: 'rus', nl: 'dut', el: 'gre', sq: 'alb', sr: 'srp', sv: 'swe', th: 'tha', ja: 'jpn', ko: 'kor', zh: 'chi', bg: 'bul', ro: 'rum', hu: 'hun', pl: 'pol', cs: 'cze', he: 'heb', fa: 'per', hi: 'hin', und: 'und' };
+var SUBCACHE = {};
+
+function utf8Bytes(str) {
+  var out = [], i, c, d;
+  for (i = 0; i < str.length; i++) {
+    c = str.charCodeAt(i);
+    if (c >= 0xD800 && c < 0xDC00 && i + 1 < str.length) { d = str.charCodeAt(i + 1); if (d >= 0xDC00 && d < 0xE000) { c = 0x10000 + ((c - 0xD800) << 10) + (d - 0xDC00); i++; } }
+    if (c < 128) out.push(c);
+    else if (c < 2048) out.push(192 | (c >> 6), 128 | (c & 63));
+    else if (c < 65536) out.push(224 | (c >> 12), 128 | ((c >> 6) & 63), 128 | (c & 63));
+    else out.push(240 | (c >> 18), 128 | ((c >> 12) & 63), 128 | ((c >> 6) & 63), 128 | (c & 63));
+  }
+  return out;
+}
+function b64enc(str) {
+  var b = utf8Bytes(str), o = '', i, n;
+  for (i = 0; i < b.length; i += 3) {
+    n = (b[i] << 16) | ((b[i + 1] || 0) << 8) | (b[i + 2] || 0);
+    o += B64.charAt((n >> 18) & 63) + B64.charAt((n >> 12) & 63) + (i + 1 < b.length ? B64.charAt((n >> 6) & 63) : '=') + (i + 2 < b.length ? B64.charAt(n & 63) : '=');
+  }
+  return o;
+}
+function toVtt(t) {
+  t = String(t || '').replace(/^\uFEFF/, '');
+  if (/^\s*WEBVTT/.test(t)) return t;
+  return 'WEBVTT\n\n' + t.replace(/\r/g, '').replace(/(\d\d:\d\d:\d\d),(\d{3})/g, '$1.$2');
+}
+function isSubText(r) { return r.status === 200 && /^\s*(?:\uFEFF)?\s*(WEBVTT|\d+\s*\r?\n\s*\d\d:\d\d)/.test(r.text || ''); }
+
+// Altyazıyı indirip dene: başlıksız açılıyorsa düz adres; Referer isteyen sunucuysa eklentide indirilip data: adresine gömülür
+function prepSub(sb, embedUrl) {
+  if (SUBCACHE[sb.url]) return SUBCACHE[sb.url];
+  var org = originOf(embedUrl), own = originOf(sb.url);
+  var sets = [{ 'User-Agent': UA }, { 'User-Agent': UA, 'Referer': own + '/', 'Origin': own }, { 'User-Agent': UA, 'Referer': org + '/', 'Origin': org }, { 'User-Agent': UA, 'Referer': embedUrl }];
+  function next(i) {
+    if (i >= sets.length) return Promise.resolve(null);
+    return rawGet(sb.url, sets[i], '', 7000).then(function (r) {
+      if (isSubText(r)) return { i: i, text: r.text, h: sets[i] };
+      return next(i + 1);
+    });
+  }
+  var p = next(0).then(function (g) {
+    var lang3 = LANG3[sb.lang] || sb.lang || 'und';
+    var out = { id: 'hdfc-' + lang3 + '-' + (sb.url.split('/').pop() || '').slice(0, 24), url: sb.url, lang: lang3, language: lang3, label: sb.label, name: sb.label, title: sb.label };
+    if (!g) { note('sub ' + lang3 + ' acilmadi'); return out; }              // indirilemedi: yine de düz adresi ver
+    if (g.i === 0) { note('sub ' + lang3 + ' acik ' + g.text.length); return out; }
+    note('sub ' + lang3 + ' basliklı h' + g.i + ' ' + g.text.length);
+    out.headers = g.h;
+    if (AYAR.ALTYAZI_VERI_URI && g.text.length < 600000) out.url = 'data:text/vtt;charset=utf-8;base64,' + b64enc(toVtt(g.text));
+    return out;
+  });
+  SUBCACHE[sb.url] = p;
+  return p;
+}
+function prepSubs(subs, embedUrl) {
+  var list = (subs || []).slice().sort(function (a, b) { return (a.lang === 'tr' ? 0 : a.lang === 'en' ? 1 : 2) - (b.lang === 'tr' ? 0 : b.lang === 'en' ? 1 : 2); }).slice(0, 8);
+  return Promise.all(list.map(function (sb) { return prepSub(sb, embedUrl).catch(function () { return null; }); })).then(function (r) { return r.filter(Boolean); });
+}
+
 function debugStream(msg) {
   if (!AYAR.DEBUG_MODU) return [];
   return [msg].concat(dbg.slice(0, 60)).map(function (r) {
@@ -777,7 +841,7 @@ function findPage(imdb, titles, year, isTv, season, episode) {
 
 function getStreamsInner(tmdbId, mediaType, season, episode, holder) {
   var isTv = (mediaType === 'tv' || mediaType === 'series');
-  dbg = ['v1.4.1'];
+  dbg = ['v1.5.0'];
   var base = 'https://api.themoviedb.org/3/' + (isTv ? 'tv' : 'movie') + '/' + tmdbId + '?api_key=' + TMDB_KEY;
   return Promise.all([
     getJson(base + '&language=tr-TR' + (isTv ? '&append_to_response=external_ids' : '')),
@@ -819,7 +883,9 @@ function getStreamsInner(tmdbId, mediaType, season, episode, holder) {
               var sets = streamHeaderSets(res.base || embedUrl);
               var strictMap = res.strict || {};
               var cands = res.urls.slice().sort(function (a, b) { return (strictMap[a] ? 0 : 1) - (strictMap[b] ? 0 : 1) || rank(a) - rank(b); }).slice(0, 6);
-              return Promise.all(cands.map(function (u) { return verifyUrl(u, sets).then(function (v) { return { u: u, v: v }; }); })).then(function (vs) {
+              var subsP = prepSubs(res.subs, res.base || embedUrl);
+              return Promise.all([Promise.all(cands.map(function (u) { return verifyUrl(u, sets).then(function (v) { return { u: u, v: v }; }); })), subsP]).then(function (both) {
+                var vs = both[0], subsF = both[1];
                 var good = vs.filter(function (x) { return x.v.ok; });
                 if (!good.length) {
                   var st = vs.filter(function (x) { return strictMap[x.u]; });
@@ -828,7 +894,7 @@ function getStreamsInner(tmdbId, mediaType, season, episode, holder) {
                 good.forEach(function (x, i) {
                   if (seenUrl[x.u]) return;
                   seenUrl[x.u] = 1;
-                  holder.streams.push(makeStream(job, embedUrl, x.u, x.v, res.subs, i));
+                  holder.streams.push(makeStream(job, embedUrl, x.u, x.v, subsF, i));
                 });
               });
             });
