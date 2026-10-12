@@ -23,7 +23,8 @@ var AYAR = {
   DEBUG_MODU: false,
   ALTYAZILI_GOSTER: false,  // true: "Altyazılı" sekmesindeki oynatıcılar da eklenir
   MAX_ALTERNATIF: 4,        // en fazla kaç oynatıcı (Rapid, Close ...) denensin
-  ALTYAZI_TANI: true,       // deneme: her altyazı 2-3 biçimde (düz / gömülü vtt / gömülü srt) listelenir; hangisi çalışırsa onu söyle, gerisini kapatırız
+  ALTYAZI_TANI: false,       // deneme: her altyazı 2-3 biçimde (düz / gömülü vtt / gömülü srt) listelenir; hangisi çalışırsa onu söyle, gerisini kapatırız
+  ALTYAZI_DILLER: ['tr'],   // hangi dillerin altyazısı eklensin (İngilizce de istersen: ['tr', 'en']); "Forced" altyazılar hiç eklenmez
   ALTYAZI_YUKLE: true,      // site yalnız WebVTT veriyorsa: SRT'ye çevirip geçici metin barındırıcıya (paste.rs / dpaste.com) yükle, Nuvio o adresten okusun
   DOGRULA: true,            // m3u8 bağlantılarını oynatmadan önce kontrol et (Source error'u önler)
   ISTEK_SURESI: 7000,       // ms: tek istek üst sınırı
@@ -802,7 +803,7 @@ function prepSub(sb, embedUrl) {
       var lab = sb.label + (AYAR.ALTYAZI_TANI ? ' (' + suffix + ')' : '');
       return { id: 'hdfc-' + lang3 + '-' + base + '-' + tag, url: url, lang: lang3, language: lang3, label: lab, name: lab, title: lab };
     }
-    if (!g) { note('sub ' + lang3 + ' acilmadi'); return [mk('v', 'vtt', sb.url)]; }
+    if (!g) { note('sub ' + lang3 + ' acilmadi'); return AYAR.ALTYAZI_TANI ? [mk('v', 'vtt', sb.url)] : []; }
     note('sub ' + lang3 + (g.i === 0 ? ' acik ' : ' basliklı h' + g.i + ' ') + g.text.length);
     var vtt = mk('v', 'vtt', sb.url);
     // Nuvio altyazıyı kendisi indirip SRT ayrıştırıcısıyla okuyor: indeks satırı + virgüllü zaman bekliyor. WebVTT (indekssiz, noktalı zaman) ekranda boş kalıyor.
@@ -811,9 +812,9 @@ function prepSub(sb, embedUrl) {
     var pSib = sib ? rawGet(sib, sets[0], '', 6000).then(function (r) { return isSrtText(r) ? sib : ''; }) : Promise.resolve('');
     return pSib.then(function (sibOk) {
       if (sibOk) { note('sub ' + lang3 + ' srt kardes ok'); var o = mk('s', 'srt', sibOk); return AYAR.ALTYAZI_TANI ? [o, vtt] : [o]; }
-      if (!AYAR.ALTYAZI_YUKLE) return [vtt];
+      if (!AYAR.ALTYAZI_YUKLE) return AYAR.ALTYAZI_TANI ? [vtt] : [];
       return uploadText(vttToSrt(g.text), base).then(function (url) {
-        if (!url) { note('sub ' + lang3 + ' yukleme basarisiz'); return [vtt]; }
+        if (!url) { note('sub ' + lang3 + ' yukleme basarisiz'); return AYAR.ALTYAZI_TANI ? [vtt] : []; }
         note('sub ' + lang3 + ' yuklendi ' + hostShort(url));
         var o = mk('u', 'srt yüklü', url);
         return AYAR.ALTYAZI_TANI ? [o, vtt] : [o];
@@ -824,7 +825,7 @@ function prepSub(sb, embedUrl) {
   return p;
 }
 function prepSubs(subs, embedUrl) {
-  var list = (subs || []).slice().sort(function (a, b) { return (a.lang === 'tr' ? 0 : a.lang === 'en' ? 1 : 2) - (b.lang === 'tr' ? 0 : b.lang === 'en' ? 1 : 2); }).slice(0, 8);
+  var list = (subs || []).filter(function (x) { return (AYAR.ALTYAZI_DILLER || []).indexOf(x.lang) > -1 && !/forced|zorunlu/i.test(x.label + ' ' + x.url); }).sort(function (a, b) { return (a.lang === 'tr' ? 0 : a.lang === 'en' ? 1 : 2) - (b.lang === 'tr' ? 0 : b.lang === 'en' ? 1 : 2); }).slice(0, 8);
   return Promise.all(list.map(function (sb) { return prepSub(sb, embedUrl).catch(function () { return null; }); })).then(function (r) {
     var flat = [];
     r.forEach(function (x) { (x || []).forEach(function (y) { flat.push(y); }); });
@@ -901,7 +902,7 @@ function findPage(imdb, titles, year, isTv, season, episode) {
 
 function getStreamsInner(tmdbId, mediaType, season, episode, holder) {
   var isTv = (mediaType === 'tv' || mediaType === 'series');
-  dbg = ['v1.6.0'];
+  dbg = ['v1.6.1'];
   var base = 'https://api.themoviedb.org/3/' + (isTv ? 'tv' : 'movie') + '/' + tmdbId + '?api_key=' + TMDB_KEY;
   return Promise.all([
     getJson(base + '&language=tr-TR' + (isTv ? '&append_to_response=external_ids' : '')),
