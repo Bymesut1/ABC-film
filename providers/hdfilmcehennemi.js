@@ -20,7 +20,7 @@ var AYAR = {
   SITE: 'https://hdfilmcehennemi.nl',
   EKLENTI_ADI: 'hdfilmcehennemi',
   // true iken akış çıkmazsa (ve akışların altında) neden çıkmadığını yazan "DEBUG" satırları görünür. Çalışınca false yap.
-  DEBUG_MODU: true,
+  DEBUG_MODU: false,
   ALTYAZILI_GOSTER: false,  // true: "Altyazılı" sekmesindeki oynatıcılar da eklenir
   MAX_ALTERNATIF: 4,        // en fazla kaç oynatıcı (Rapid, Close ...) denensin
   DOGRULA: true,            // m3u8 bağlantılarını oynatmadan önce kontrol et (Source error'u önler)
@@ -528,7 +528,8 @@ function extractSubs(blob, base) {
   var t = String(blob || '').replace(/\\\//g, '/').replace(/\\u0026/g, '&').replace(/&amp;/g, '&').replace(/&quot;/g, '"');
   var out = [], seen = {};
   function push(url, label, kind, srclang) {
-    url = String(url || '').replace(/\\/g, '');
+    label = unesc(decodeHtml(String(label || '')));         // "T\u00fcrk\u00e7e" -> "Türkçe"
+    url = unesc(String(url || '')).replace(/\\/g, '');
     if (!url || /thumb|sprite|storyboard/i.test(url) || /thumbnails/i.test(kind || '')) return;
     if (/\.(jpe?g|png|webp|gif|css|js|m3u8|mp4)(\?|$)/i.test(url)) return;
     url = /^https?:/i.test(url) ? url : (url.indexOf('//') === 0 ? 'https:' + url : base + (url.charAt(0) === '/' ? '' : '/') + url);
@@ -776,7 +777,7 @@ function findPage(imdb, titles, year, isTv, season, episode) {
 
 function getStreamsInner(tmdbId, mediaType, season, episode, holder) {
   var isTv = (mediaType === 'tv' || mediaType === 'series');
-  dbg = ['v1.4.0'];
+  dbg = ['v1.4.1'];
   var base = 'https://api.themoviedb.org/3/' + (isTv ? 'tv' : 'movie') + '/' + tmdbId + '?api_key=' + TMDB_KEY;
   return Promise.all([
     getJson(base + '&language=tr-TR' + (isTv ? '&append_to_response=external_ids' : '')),
