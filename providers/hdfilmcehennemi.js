@@ -20,11 +20,11 @@ var AYAR = {
   SITE: 'https://hdfilmcehennemi.nl',
   EKLENTI_ADI: 'hdfilmcehennemi',
   // true iken akış çıkmazsa (ve akışların altında) neden çıkmadığını yazan "DEBUG" satırları görünür. Çalışınca false yap.
-  DEBUG_MODU: true,
+  DEBUG_MODU: false,
   ALTYAZILI_GOSTER: false,  // true: "Altyazılı" sekmesindeki oynatıcılar da eklenir
   MAX_ALTERNATIF: 4,        // en fazla kaç oynatıcı (Rapid, Close ...) denensin
   ALTYAZI_TANI: true,       // deneme: her altyazı 2-3 biçimde (düz / gömülü vtt / gömülü srt) listelenir; hangisi çalışırsa onu söyle, gerisini kapatırız
-  ALTYAZI_VERI_URI: true,   // oynatıcı altyazıyı kendi çekemiyorsa (Referer isteyen sunucu) altyazıyı eklentide indirip data: adresi olarak ver
+  ALTYAZI_YUKLE: true,      // site yalnız WebVTT veriyorsa: SRT'ye çevirip geçici metin barındırıcıya (paste.rs / dpaste.com) yükle, Nuvio o adresten okusun
   DOGRULA: true,            // m3u8 bağlantılarını oynatmadan önce kontrol et (Source error'u önler)
   ISTEK_SURESI: 7000,       // ms: tek istek üst sınırı
   GENEL_SURE: 25000         // ms: toplam üst sınır; dolunca o ana kadar bulunan akışlar VERİLİR
@@ -755,6 +755,35 @@ function vttToSrt(t) {
 }
 function isSubText(r) { return r.status === 200 && /^\s*(?:\uFEFF)?\s*(WEBVTT|\d+\s*\r?\n\s*\d\d:\d\d)/.test(r.text || ''); }
 
+
+function isSrtText(r) { return (r.status === 200) && /^\s*(?:\uFEFF)?\s*\d+\s*\r?\n\s*\d\d:\d\d:\d\d,\d{3}\s*-->/.test(r.text || ''); }
+
+// Metni geçici bir barındırıcıya yükle, geri okunabilen http adresini ver (olmazsa '')
+function uploadText(text, name) {
+  var hdr = { 'User-Agent': UA };
+  function check(u) { return rawGet(u, hdr, '', 6000).then(function (r) { return isSrtText(r) ? u : ''; }); }
+  function viaPasteRs() {
+    return withTimeout(fetch('https://paste.rs', { method: 'POST', headers: { 'Content-Type': 'text/plain; charset=utf-8', 'User-Agent': UA }, body: text }), 9000)
+      .then(function (res) { return res.text(); })
+      .then(function (t) {
+        var u = String(t || '').trim().split(/\s/)[0];
+        if (!/^https?:\/\/paste\.rs\/[\w-]+$/.test(u)) return '';
+        return check(u + '.srt').then(function (ok) { return ok || check(u); });
+      }).catch(function () { return ''; });
+  }
+  function viaDpaste() {
+    var form = 'content=' + encodeURIComponent(text) + '&syntax=text&expiry_days=3';
+    return withTimeout(fetch('https://dpaste.com/api/v2/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': UA }, body: form }), 9000)
+      .then(function (res) { return res.text(); })
+      .then(function (t) {
+        var u = String(t || '').trim().split(/\s/)[0];
+        if (!/^https?:\/\/dpaste\.com\/\w+/.test(u)) return '';
+        return check(u + '.txt');
+      }).catch(function () { return ''; });
+  }
+  return viaPasteRs().then(function (u) { return u || viaDpaste(); });
+}
+
 // Altyazıyı indirip dene: başlıksız açılıyorsa düz adres; Referer isteyen sunucuysa eklentide indirilip data: adresine gömülür
 function prepSub(sb, embedUrl) {
   if (SUBCACHE[sb.url]) return SUBCACHE[sb.url];
@@ -769,22 +798,27 @@ function prepSub(sb, embedUrl) {
   }
   var p = next(0).then(function (g) {
     var lang3 = LANG3[sb.lang] || sb.lang || 'und', base = (sb.url.split('/').pop() || '').slice(0, 24);
-    function mk(tag, suffix, url, hdr) {
+    function mk(tag, suffix, url) {
       var lab = sb.label + (AYAR.ALTYAZI_TANI ? ' (' + suffix + ')' : '');
-      var o = { id: 'hdfc-' + lang3 + '-' + base + '-' + tag, url: url, lang: lang3, language: lang3, label: lab, name: lab, title: lab };
-      if (hdr) o.headers = hdr;
-      return o;
+      return { id: 'hdfc-' + lang3 + '-' + base + '-' + tag, url: url, lang: lang3, language: lang3, label: lab, name: lab, title: lab };
     }
-    if (!g) { note('sub ' + lang3 + ' acilmadi'); return [mk('d', 'düz', sb.url, null)]; }   // indirilemedi: yine de düz adresi ver
+    if (!g) { note('sub ' + lang3 + ' acilmadi'); return [mk('v', 'vtt', sb.url)]; }
     note('sub ' + lang3 + (g.i === 0 ? ' acik ' : ' basliklı h' + g.i + ' ') + g.text.length);
-    var out = [mk('d', 'düz', sb.url, g.i === 0 ? null : g.h)];
-    if (g.i !== 0 || AYAR.ALTYAZI_TANI) {                                  // başlık isteyen sunucu (ya da deneme modu): eklentide indirilmiş kopyalar
-      if (AYAR.ALTYAZI_VERI_URI && g.text.length < 600000) {
-        out.push(mk('v', 'gömülü vtt', 'data:text/vtt;charset=utf-8;base64,' + b64enc(toVtt(g.text)), null));
-        if (AYAR.ALTYAZI_TANI) out.push(mk('s', 'gömülü srt', 'data:application/x-subrip;charset=utf-8;base64,' + b64enc(vttToSrt(g.text)), null));
-      }
-    }
-    return out;
+    var vtt = mk('v', 'vtt', sb.url);
+    // Nuvio altyazıyı kendisi indirip SRT ayrıştırıcısıyla okuyor: indeks satırı + virgüllü zaman bekliyor. WebVTT (indekssiz, noktalı zaman) ekranda boş kalıyor.
+    // 1) aynı yolda .srt kardeşi var mı?  2) yoksa SRT'ye çevirip geçici bir metin barındırıcıya yükle ve o adresi ver.
+    var sib = /\.vtt(\?|$)/i.test(sb.url) ? sb.url.replace(/\.vtt(\?|$)/i, '.srt$1') : '';
+    var pSib = sib ? rawGet(sib, sets[0], '', 6000).then(function (r) { return isSrtText(r) ? sib : ''; }) : Promise.resolve('');
+    return pSib.then(function (sibOk) {
+      if (sibOk) { note('sub ' + lang3 + ' srt kardes ok'); var o = mk('s', 'srt', sibOk); return AYAR.ALTYAZI_TANI ? [o, vtt] : [o]; }
+      if (!AYAR.ALTYAZI_YUKLE) return [vtt];
+      return uploadText(vttToSrt(g.text), base).then(function (url) {
+        if (!url) { note('sub ' + lang3 + ' yukleme basarisiz'); return [vtt]; }
+        note('sub ' + lang3 + ' yuklendi ' + hostShort(url));
+        var o = mk('u', 'srt yüklü', url);
+        return AYAR.ALTYAZI_TANI ? [o, vtt] : [o];
+      });
+    });
   });
   SUBCACHE[sb.url] = p;
   return p;
@@ -867,7 +901,7 @@ function findPage(imdb, titles, year, isTv, season, episode) {
 
 function getStreamsInner(tmdbId, mediaType, season, episode, holder) {
   var isTv = (mediaType === 'tv' || mediaType === 'series');
-  dbg = ['v1.5.1'];
+  dbg = ['v1.6.0'];
   var base = 'https://api.themoviedb.org/3/' + (isTv ? 'tv' : 'movie') + '/' + tmdbId + '?api_key=' + TMDB_KEY;
   return Promise.all([
     getJson(base + '&language=tr-TR' + (isTv ? '&append_to_response=external_ids' : '')),
